@@ -9,6 +9,14 @@ module ActiveReload
     def self.name
       ActiveRecord::Base.name
     end
+    
+    def retrieve_connection(new_db = nil)
+      if new_db
+        establish_connection configurations[Rails.env]['master_database'] || configurations['master_database'] || Rails.env
+      else
+        establish_connection configurations[Rails.env]['slave_database'] || Rails.env
+      end
+    end
     establish_connection configurations[Rails.env]['slave_database'] || Rails.env
   end
 
@@ -21,7 +29,7 @@ module ActiveReload
     end
     
     def master
-      @slave.connection_handler.retrieve_connection(@master)
+      @slave.retrieve_connection(@master)
     end
     
     def slave
