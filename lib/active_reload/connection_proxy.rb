@@ -1,39 +1,62 @@
+class << ActiveRecord::Base
+  alias_method :base_connention, :connection
+  alias_method :base_retrieve_connection, :retrieve_connection
+  def retrieve_connection(new_db = nil)
+      if new_db
+        #puts configurations[Rails.env]['master_database'] || configurations['master_database'] || Rails.env
+        establish_connection configurations[Rails.env]['master_database'] || configurations['master_database'] || Rails.env
+      else
+        #puts configurations[Rails.env]['slave_database'] || Rails.env
+        establish_connection configurations[Rails.env]['slave_database'] || Rails.env
+      end
+    base_retrieve_connection
+  end
+
+  def get_connection_config
+    configurations[Rails.env].symbolize_keys
+  end
+end
+
+
+
 module ActiveReload
   class MasterDatabase < ActiveRecord::Base
     self.abstract_class = true
-    establish_connection configurations[Rails.env]['master_database'] || configurations['master_database'] || Rails.env
+    #establish_connection configurations[Rails.env]['master_database'] || configurations['master_database'] || Rails.env
   end
 
-  class SlaveDatabase < ActiveRecord::Base
-    self.abstract_class = true
-    def self.name
-      ActiveRecord::Base.name
-    end
-    
-    def retrieve_connection(new_db = nil)
-      if new_db
-        establish_connection configurations[Rails.env]['master_database'] || configurations['master_database'] || Rails.env
-      else
-        establish_connection configurations[Rails.env]['slave_database'] || Rails.env
-      end
-    end
-    establish_connection configurations[Rails.env]['slave_database'] || Rails.env
-  end
+  
 
   class ConnectionProxy
+
+    attr_accessor :force_master
     
     def initialize(master_class, slave_class)
       @master  = master_class
       @slave   = slave_class
-      @current = :slave
+      @connection_pool ={}
+      slave
+
+      @config = slave_class.get_connection_config
     end
     
     def master
-      @slave.retrieve_connection(@master)
+      unless @current == :master
+        @connection = @slave.retrieve_connection(@master)
+        @current = :master
+      end
+      @connection
     end
     
     def slave
-      @slave.retrieve_connection
+      unless @force_master or @current == :slave
+        @current = :slave
+        @connection = @slave.retrieve_connection
+      end
+      if @force_master
+        @connection = master
+      end
+      @connection
     end
     
     def current
@@ -41,19 +64,19 @@ module ActiveReload
     end
     
     def self.setup!
-      if slave_defined?
-        setup_for ActiveReload::MasterDatabase, ActiveReload::SlaveDatabase
-      else
+      #if slave_defined?
         setup_for ActiveReload::MasterDatabase
-      end
+      #else
+       # setup_for ActiveReload::MasterDatabase
+      #end
     end
 
     def self.slave_defined?
       ActiveRecord::Base.configurations[Rails.env]['slave_database']
     end
 
-    def self.setup_for(master, slave = nil)
-      slave ||= ActiveRecord::Base
+    def self.setup_for(master)
+      slave = ActiveRecord::Base
       slave.send :include, ActiveRecordConnectionMethods
       ActiveRecord::Observer.send :include, ActiveReload::ObserverExtensions
       slave.connection_proxy = new(master, slave)
@@ -67,27 +90,28 @@ module ActiveReload
     end
 
     def set_to_master!
-      unless @current == :master
-        @slave.logger.info "Switching to Master"
-        @current = :master
-      end
+      master
     end
 
     def set_to_slave!
       unless @current == :slave
-        @master.logger.info "Switching to Slave"
         @current = :slave
       end
     end
+
 
     delegate :insert, :update, :delete, :create_table, :rename_table, :drop_table, :add_column, :remove_column,
       :change_column, :change_column_default, :rename_column, :add_index, :remove_index, :initialize_schema_information,
       :dump_schema_information, :execute, :columns, :to => :master
 
+    delegate :select_one, :select_all, :select_value, :select_values, :select_rows, :to => :slave
+
     def transaction(start_db_transaction = true, &block)
-      with_master(start_db_transaction) do
-        master.transaction(start_db_transaction, &block)
-      end
+      master
+      @force_master = true
+      result = current.transaction(start_db_transaction, &block)
+      @force_master = false
+      result
     end
 
     def method_missing(method, *args, &block)
